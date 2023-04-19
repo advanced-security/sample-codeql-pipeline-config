@@ -25,11 +25,12 @@ steps:
     - codeql --version
 
     # Initialize and Create the CodeQL Database
+    # This will try to use the autobuilder for compiled languages, or create the database for interpreted languages
     - codeql database create --language="$CODEQL_LANGUAGE" .codeql-database
 
-    # Here is where for compiled languages you will need the build command
-    #  supplied.
-    # - echo "Manual build command here..."
+    # To supply a manual build command, you can comment the line above out and instead use the following command,
+    # replacing "make" with your build command.
+    # codeql database create --language="$CODEQL_LANGUAGE" .codeql-database --command="make"
 
     # Analyse the code inside the database and generate the SARIF output.
     - codeql database analyze
