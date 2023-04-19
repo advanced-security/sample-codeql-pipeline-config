@@ -1,4 +1,4 @@
-# Sample pipeline files for popular CI/CD systems
+# Sample pipeline files for using CodeQL in popular CI/CD systems
 
 > ℹ️ This is an _unofficial_ project created by Field Security Services, and is not officially supported by GitHub.
 
