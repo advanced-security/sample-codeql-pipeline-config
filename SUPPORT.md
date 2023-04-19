@@ -6,7 +6,7 @@ This project uses GitHub issues to track bugs and feature requests. Please searc
 
 For help or questions about using this project, please open a discussion.
 
-- `remap-sarif` is maintained by GitHub Field Security Specialist staff. We will do our best to respond to support, feature requests, and community questions in a timely manner.
+This repository is maintained by GitHub Field Security Specialist staff. We will do our best to respond to support, feature requests, and community questions in a timely manner.
 
 ## GitHub Support Policy
 
