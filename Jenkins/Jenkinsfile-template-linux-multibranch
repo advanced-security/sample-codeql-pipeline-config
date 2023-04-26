@@ -1,0 +1,91 @@
+def isPRBuild() {
+  return (BRANCH_NAME ==~ /^PR-\d+$/)
+}
+
+def getPRNumber() {
+  def matcher = (BRANCH_NAME =~ /^PR-(?<PR>\d+)$/)
+  assert matcher.matches()
+  return matcher.group('PR')
+}
+
+def getPRRef() {
+    return isPRBuild() ? "refs/pull/${getPRNumber()}/${GITHUB_PR_REF_TYPE}" : "refs/heads/${BRANCH_NAME}"
+}
+
+pipeline {
+
+  agent any
+
+  environment {
+    GITHUB_CREDS = credentials('584cc76f-fcbf-4e9c-bb09-e4b86ffaa838')
+    DEFAULT_BRANCH = 'main'
+    GITHUB_PR_REF_TYPE = 'head'
+    GITHUB_REPO = 'od-ctcampbell/demo-jenkins-1'
+    CODEQL_LANGUAGE = 'java'
+    CODEQL_BUILD_COMMAND = './mvnw clean package -B'
+    CODEQL_QUERY_SUITE = "codeql/${CODEQL_LANGUAGE}-queries:codeql-suites/${CODEQL_LANGUAGE}-security-extended.qls"
+    DEPENDENCY_SUBMISSION_EXECUTABLES_URL = 'https://api.github.com/repos/advanced-security/maven-dependency-submission-action/actions/artifacts/654708398/zip'
+    DEPENDENCY_SUBMISSION_EXECUTABLE = 'maven-dependency-tree-submission-linux'
+    PR_REF = getPRRef()
+  }
+
+  stages {
+    stage('Run security analysis') {
+      parallel {
+        stage('Run CodeQL analysis') {
+          when {
+            anyOf {
+              branch DEFAULT_BRANCH
+              expression { CHANGE_ID != null && CHANGE_AUTHOR != 'dependabot[bot]'}
+            }
+          }
+          steps {
+            // sh 'env'
+            // sh 'rm -rf ./codeql-bin && mkdir ./codeql-bin'
+            // sh 'wget -q https://github.com/github/codeql-action/releases/latest/download/codeql-bundle-linux64.tar.gz -O codeql-bundle-linux64.tar.gz'
+            // sh 'tar xzf codeql-bundle-linux64.tar.gz -C ./codeql-bin/'
+            // sh 'rm codeql-bundle-linux64.tar.gz'
+            sh '/codeql/codeql database create ./codeql-db \
+                --language ${CODEQL_LANGUAGE} \
+                --overwrite \
+                --command "${CODEQL_BUILD_COMMAND}"'
+            sh '/codeql/codeql database analyze ./codeql-db \
+                --format=sarif-latest \
+                --output=codeql-results.sarif \
+                ${CODEQL_QUERY_SUITE}'
+            sh 'echo $GITHUB_CREDS_PSW | /codeql/codeql github upload-results \
+                --github-auth-stdin \
+                --sarif=codeql-results.sarif \
+                --repository=${GITHUB_REPO} \
+                --ref=${PR_REF} \
+                --commit=${GIT_COMMIT}'
+          }
+        }
+
+        stage('Submit dependency snapshot') {
+          when {
+            anyOf {
+              branch DEFAULT_BRANCH
+              expression { CHANGE_ID != null }
+            }
+          }
+          steps {
+            sh 'curl -L -s \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${GITHUB_CREDS_PSW}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                ${DEPENDENCY_SUBMISSION_EXECUTABLES_URL} \
+                -o executables.zip'
+            sh 'unzip -o executables.zip'
+            sh 'chmod +x ./${DEPENDENCY_SUBMISSION_EXECUTABLE}'
+            sh 'PATH=./:$PATH ./${DEPENDENCY_SUBMISSION_EXECUTABLE} \
+                -r ${GITHUB_REPO} \
+                -t ${GITHUB_CREDS_PSW} \
+                -b ${PR_REF} \
+                -s ${GIT_COMMIT}'
+          }
+        }
+      }
+    }
+  }
+}
