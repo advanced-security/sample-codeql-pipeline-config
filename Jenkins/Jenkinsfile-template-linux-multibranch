@@ -17,14 +17,22 @@ pipeline {
   agent any
 
   environment {
+    // The Jenkins Credentials ID for your GitHub PAT credential
     GITHUB_CREDS = credentials('584cc76f-fcbf-4e9c-bb09-e4b86ffaa838')
+    // The repo default branch name
     DEFAULT_BRANCH = 'main'
+    // The type of ref that will be checked out for a job initiated by a GitHub PR. 'merge' for the default PR merge commit, 'head' for the head of the branch being merged.
     GITHUB_PR_REF_TYPE = 'head'
+    // The name of the GitHub repository to run the analysis on
     GITHUB_REPO = 'od-ctcampbell/demo-jenkins-1'
     CODEQL_LANGUAGE = 'java'
     CODEQL_BUILD_COMMAND = './mvnw clean package -B'
     CODEQL_QUERY_SUITE = "codeql/${CODEQL_LANGUAGE}-queries:codeql-suites/${CODEQL_LANGUAGE}-security-extended.qls"
+    // The Dependency Submission Action executable archive
+    // See https://github.com/advanced-security/maven-dependency-submission-action/actions/workflows/publish_executables.yml for the latest version
     DEPENDENCY_SUBMISSION_EXECUTABLES_URL = 'https://api.github.com/repos/advanced-security/maven-dependency-submission-action/actions/artifacts/654708398/zip'
+    // The Dependency Submission Action executable
+    // See https://github.com/advanced-security/maven-dependency-submission-action#command-line-usage for options
     DEPENDENCY_SUBMISSION_EXECUTABLE = 'maven-dependency-tree-submission-linux'
     PR_REF = getPRRef()
   }
