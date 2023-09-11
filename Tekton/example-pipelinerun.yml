@@ -1,0 +1,32 @@
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  generateName: codeql-webgoat-run-
+spec:
+  pipelineRef:
+    name: codeql-webgoat
+  podTemplate:
+    securityContext:
+      fsGroup: 65532
+  workspaces:
+  - name: shared-data
+    volumeClaimTemplate:
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 500Mi
+  params:
+  - name: build-image
+    value: eclipse-temurin:17-jdk
+  - name: repo-url
+    value: https://github.com/ctcampbellcom/webgoat-in-a-folder
+  - name: source-path-dir
+    value: webgoat
+  - name: codeql-language
+    value: java
+  - name: codeql-build-command
+    value: ./mvnw clean package -f "pom.xml" -B -V -e -ntp -Dfindbugs.skip -Dcheckstyle.skip -Dpmd.skip=true -Dspotbugs.skip -Denforcer.skip -Dmaven.javadoc.skip -DskipTests -Dmaven.test.skip.exec -Dlicense.skip=true -Drat.skip=true -Dspotless.check.skip=true
+  # - name: codeql-extra-args
+  #   value: -v

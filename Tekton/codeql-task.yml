@@ -1,0 +1,120 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: codeql
+  annotations:
+    tekton.dev/platforms: "linux/amd64"
+spec:
+  description: Analyse code with CodeQL
+  params:
+  - name: build-image
+    type: string
+    description: The image to use for building the project.
+  - name: repo
+    type: string
+    description: The short name for the repository, e.g. ctcampbellcom/webgoat.
+    default: ""
+  - name: ref
+    type: string
+    description: The git ref of the checked out source.
+    default: ""
+  - name: commit-sha
+    type: string
+    description: The git commit SHA of the checked out source.
+    default: ""
+  - name: source-path-dir
+    type: string
+    description: The path to the source code directory relative to the checkout root.
+    default: "."
+  - name: codeql-bin-path
+    type: string
+    description: The download location for the CodeQL binary folder.
+    default: $(workspaces.source.path)/codeql-bin
+  - name: codeql-language
+    type: string
+    description: The language to analyse.
+  - name: codeql-build-command
+    type: string
+    description: The command to build the project.
+    default: ""
+  - name: codeql-query-suite
+    type: string
+    description: The query suite to use.
+    default: $(params.codeql-language)-code-scanning
+  - name: codeql-extra-args
+    type: string
+    description: Extra arguments to pass to the CodeQL CLI.
+    default: ""
+  - name: github-token-secret
+    type: string
+    description: Kubernetes secret name to use for uploading results.
+    default: github-token
+  workspaces:
+  - name: source
+  steps:
+  - name: init-build-analyse
+    image: $(params.build-image)
+    resources:
+      requests:
+        memory: 4Gi
+      limits:
+        memory: 5Gi
+    env:
+    - name: SOURCE_PATH
+      value: $(workspaces.source.path)
+    - name: SOURCE_PATH_DIR
+      value: $(params.source-path-dir)
+    - name: REPO
+      value: $(params.repo)
+    - name: REF
+      value: $(params.ref)
+    - name: COMMIT_SHA
+      value: $(params.commit-sha)
+    - name: CODEQL_PATH
+      value: $(params.codeql-bin-path)
+    - name: CODEQL_LANGUAGE
+      value: $(params.codeql-language)
+    - name: CODEQL_BUILD_COMMAND
+      value: $(params.codeql-build-command)
+    - name: CODEQL_EXTRA_ARGS
+      value: $(params.codeql-extra-args)
+    - name: CODEQL_RAM
+      value: "3500"
+    - name: CODEQL_QUERY_SUITE
+      value: $(params.codeql-query-suite)
+    - name: CODEQL_EXTRACTOR_JAVA_RUN_ANNOTATION_PROCESSORS
+      value: "true"
+    - name: GITHUB_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: $(params.github-token-secret)
+          key: github-token
+    script: | 
+      #!/usr/bin/env bash
+      set -ex
+      rm -rf $CODEQL_PATH && mkdir $CODEQL_PATH
+      wget -nv https://github.com/github/codeql-action/releases/latest/download/codeql-bundle-linux64.tar.gz -O codeql-bundle-linux64.tar.gz
+      tar -zxf codeql-bundle-linux64.tar.gz -C $CODEQL_PATH --strip-components=1
+      rm codeql-bundle-linux64.tar.gz
+      cd $SOURCE_PATH
+      $CODEQL_PATH/codeql database create ./codeql-db \
+        --ram=$CODEQL_RAM \
+        --language=${CODEQL_LANGUAGE} \
+        --overwrite \
+        --working-dir=$SOURCE_PATH_DIR \
+        ${CODEQL_BUILD_COMMAND:+--command="""$CODEQL_BUILD_COMMAND"""} \
+        ${CODEQL_EXTRA_ARGS:+$CODEQL_EXTRA_ARGS}
+      $CODEQL_PATH/codeql database analyze ./codeql-db \
+        --ram=$CODEQL_RAM \
+        --format=sarif-latest \
+        --output=codeql-results.sarif \
+        ${CODEQL_QUERY_SUITE} \
+        ${CODEQL_EXTRA_ARGS:+$CODEQL_EXTRA_ARGS}
+      $CODEQL_PATH/codeql github upload-results \
+        --sarif=codeql-results.sarif \
+        ${COMMIT_SHA:+--commit=$COMMIT_SHA} \
+        ${REF:+--ref=$REF} \
+        ${REPO:+--repository=$REPO} \
+        ${CODEQL_EXTRA_ARGS:+$CODEQL_EXTRA_ARGS}
+      rm -rf $CODEQL_PATH
+
