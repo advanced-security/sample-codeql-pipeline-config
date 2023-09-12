@@ -1,7 +1,7 @@
 apiVersion: tekton.dev/v1beta1
 kind: Pipeline
 metadata:
-  name: codeql-webgoat
+  name: webgoat-clone-and-codeql-analyse
 spec:
   description: | 
     This pipeline clones a git repo, then analyses it with CodeQL.
@@ -9,31 +9,34 @@ spec:
   - name: build-image
     type: string
     description: The image to use for building the project.
-  - name: repo-url
-    type: string
-    description: The git repo URL to clone from.
+    default: eclipse-temurin:17-jdk
   - name: ref
     type: string
     description: The git ref to check out.
     default: "refs/heads/main"
-  - name: source-path-dir
-    type: string
-    description: The path to the source code directory, relative to the checked out repository root.
-    default: ""
   - name: codeql-language
     type: string
     description: The language to analyse.
+    default: java
   - name: codeql-build-command
     type: string
     description: The command to build the project.
-    default: ""
+    default: ./mvnw clean package -f "pom.xml" -B -V -e -ntp -DskipTests -Dspotless.check.skip=true
   - name: codeql-query-suite
     type: string
     description: The query suite to use.
-    default: $(params.codeql-language)-security-extended
-  - name: codeql-extra-args
+    default: java-code-scanning
+  - name: codeql-init-extra-args
     type: string
-    description: Extra arguments to pass to the CodeQL CLI.
+    description: Extra arguments to pass to the CodeQL CLI init command.
+    default: ""
+  - name: codeql-analyze-extra-args
+    type: string
+    description: Extra arguments to pass to the CodeQL CLI analyze command.
+    default: ""
+  - name: codeql-upload-extra-args
+    type: string
+    description: Extra arguments to pass to the CodeQL CLI upload command.
     default: ""
   workspaces:
   - name: shared-data
@@ -47,11 +50,12 @@ spec:
       workspace: shared-data
     params:
     - name: url
-      value: $(params.repo-url)
+      value: https://github.com/ctcampbellcom/webgoat-in-a-folder
     - name: revision
       value: $(params.ref)
   - name: codeql
-    runAfter: ["git-clone"]
+    runAfter:
+      - git-clone
     taskRef:
       name: codeql
     workspaces:
@@ -60,19 +64,23 @@ spec:
     params:
     - name: build-image
       value: $(params.build-image)
-    - name: repo-url
-      value: $(params.repo-url)  
+    - name: repo
+      value: ctcampbellcom/webgoat-in-a-folder
     - name: ref
       value: $(params.ref)
     - name: commit-sha
       value: $(tasks.git-clone.results.commit)
     - name: source-path-dir
-      value: $(params.source-path-dir)
+      value: webgoat
     - name: codeql-language
       value: $(params.codeql-language)
     - name: codeql-build-command
       value: $(params.codeql-build-command)
     - name: codeql-query-suite
       value: $(params.codeql-query-suite)
-    - name: codeql-extra-args
-      value: $(params.codeql-extra-args)
+    - name: codeql-init-extra-args
+      value: $(params.codeql-init-extra-args)
+    - name: codeql-analyze-extra-args
+      value: $(params.codeql-analyze-extra-args)
+    - name: codeql-upload-extra-args
+      value: $(params.codeql-upload-extra-args)
