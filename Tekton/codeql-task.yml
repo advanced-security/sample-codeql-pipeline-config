@@ -26,6 +26,10 @@ spec:
     type: string
     description: The path to the source code directory relative to the checkout root.
     default: "."
+  - name: codeql-download-url
+    type: string
+    description: The download URL for the CodeQL bundle.
+    default: "https://github.com/github/codeql-action/releases/latest/download/codeql-bundle-linux64.tar.gz"
   - name: codeql-bin-path
     type: string
     description: The download location for the CodeQL binary folder.
@@ -41,24 +45,31 @@ spec:
     type: string
     description: The query suite to use.
     default: $(params.codeql-language)-code-scanning
-  - name: codeql-extra-args
+  - name: codeql-init-extra-args
     type: string
-    description: Extra arguments to pass to the CodeQL CLI.
+    description: Extra arguments to pass to the CodeQL CLI init command.
     default: ""
-  - name: github-token-secret
+  - name: codeql-analyze-extra-args
+    type: string
+    description: Extra arguments to pass to the CodeQL CLI analyze command.
+    default: ""
+  - name: codeql-upload-extra-args
+    type: string
+    description: Extra arguments to pass to the CodeQL CLI upload command.
+    default: ""
+  - name: github-token-secret-name
     type: string
     description: Kubernetes secret name to use for uploading results.
+    default: github-token
+  - name: github-token-secret-key
+    type: string
+    description: Kubernetes secret key to use for uploading results.
     default: github-token
   workspaces:
   - name: source
   steps:
   - name: init-build-analyse
     image: $(params.build-image)
-    resources:
-      requests:
-        memory: 4Gi
-      limits:
-        memory: 5Gi
     env:
     - name: SOURCE_PATH
       value: $(workspaces.source.path)
@@ -70,16 +81,20 @@ spec:
       value: $(params.ref)
     - name: COMMIT_SHA
       value: $(params.commit-sha)
+    - name: CODEQL_DOWNLOAD_URL
+      value: $(params.codeql-download-url)
     - name: CODEQL_PATH
       value: $(params.codeql-bin-path)
     - name: CODEQL_LANGUAGE
       value: $(params.codeql-language)
     - name: CODEQL_BUILD_COMMAND
       value: $(params.codeql-build-command)
-    - name: CODEQL_EXTRA_ARGS
-      value: $(params.codeql-extra-args)
-    - name: CODEQL_RAM
-      value: "3500"
+    - name: CODEQL_INIT_EXTRA_ARGS
+      value: $(params.codeql-init-extra-args)
+    - name: CODEQL_ANALYZE_EXTRA_ARGS
+      value: $(params.codeql-analyze-extra-args)
+    - name: CODEQL_UPLOAD_EXTRA_ARGS
+      value: $(params.codeql-upload-extra-args)
     - name: CODEQL_QUERY_SUITE
       value: $(params.codeql-query-suite)
     - name: CODEQL_EXTRACTOR_JAVA_RUN_ANNOTATION_PROCESSORS
@@ -87,34 +102,32 @@ spec:
     - name: GITHUB_TOKEN
       valueFrom:
         secretKeyRef:
-          name: $(params.github-token-secret)
-          key: github-token
+          name: $(params.github-token-secret-name)
+          key: $(params.github-token-secret-key)
     script: | 
       #!/usr/bin/env bash
       set -ex
       rm -rf $CODEQL_PATH && mkdir $CODEQL_PATH
-      wget -nv https://github.com/github/codeql-action/releases/latest/download/codeql-bundle-linux64.tar.gz -O codeql-bundle-linux64.tar.gz
-      tar -zxf codeql-bundle-linux64.tar.gz -C $CODEQL_PATH --strip-components=1
-      rm codeql-bundle-linux64.tar.gz
+      wget -nv $CODEQL_DOWNLOAD_URL -O codeql-bundle.tar.gz
+      tar -zxf codeql-bundle.tar.gz -C $CODEQL_PATH --strip-components=1
+      rm codeql-bundle.tar.gz
       cd $SOURCE_PATH
       $CODEQL_PATH/codeql database create ./codeql-db \
-        --ram=$CODEQL_RAM \
-        --language=${CODEQL_LANGUAGE} \
+        --language=$CODEQL_LANGUAGE \
         --overwrite \
         --working-dir=$SOURCE_PATH_DIR \
         ${CODEQL_BUILD_COMMAND:+--command="""$CODEQL_BUILD_COMMAND"""} \
-        ${CODEQL_EXTRA_ARGS:+$CODEQL_EXTRA_ARGS}
+        $CODEQL_INIT_EXTRA_ARGS
       $CODEQL_PATH/codeql database analyze ./codeql-db \
-        --ram=$CODEQL_RAM \
         --format=sarif-latest \
         --output=codeql-results.sarif \
-        ${CODEQL_QUERY_SUITE} \
-        ${CODEQL_EXTRA_ARGS:+$CODEQL_EXTRA_ARGS}
+        $CODEQL_QUERY_SUITE \
+        $CODEQL_ANALYZE_EXTRA_ARGS
       $CODEQL_PATH/codeql github upload-results \
         --sarif=codeql-results.sarif \
         ${COMMIT_SHA:+--commit=$COMMIT_SHA} \
         ${REF:+--ref=$REF} \
         ${REPO:+--repository=$REPO} \
-        ${CODEQL_EXTRA_ARGS:+$CODEQL_EXTRA_ARGS}
+        $CODEQL_UPLOAD_EXTRA_ARGS
       rm -rf $CODEQL_PATH
 
