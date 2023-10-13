@@ -14,7 +14,7 @@ Please test changes to pipeline files before submitting.
 
 ## Submitting changes
 
-Please fork the repository, and raise a Pull Request (PR) for review.
+Please fork the repository, and raise a Pull Request (PR) for review. Please sign your commits.
 
 Remember to update the [README](README.md) and [CHANGELOG](CHANGELOG.md).
 
