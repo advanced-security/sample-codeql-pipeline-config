@@ -31,7 +31,7 @@ stages:
         # The CodeQL bundle (containing the CodeQL CLI as well as the pre-compiled CodeQL Query Suites, which is recommended for CI/CD integration) can either be download as part of the pipeline,
         # or pre-downloaded and placed on the CI/CD build machine(s). If pre-downloading, replace \path\to\cli in subsequent stages with the absolute path to the download location.
         # In this example, we download the latest CLI bundle (at time of writing) as part of the pipeline from https://github.com/github/codeql-action/releases, extract it and place it on the PATH.
-        - task: PowerShell@1
+        - task: PowerShell@2
             displayName: Download CodeQL CLI Bundle
             inputs:
                 targetType: inline
@@ -48,7 +48,7 @@ stages:
         # Note that if the --command flag is omitted for compiled languages, the AutoBuilder will be used. For complex build instructions, consider placing build commands inside a script
         # and pass that to --command, or use indirect build tracing (aka. "sandwich mode").
         # Full documentation for database create step: https://codeql.github.com/docs/codeql-cli/manual/database-create/
-        - task: CmdLine@1
+        - task: CmdLine@2
             displayName: Create CodeQL Database
             inputs:
                 script: "codeql database create --language=javascript --github-auth-stdin --github-url=https://github.com/ --source-root \checkouts\my-repo db"
@@ -70,7 +70,7 @@ stages:
         # This token must have the security\_events scope.
         # Documentation for creating GitHub Apps or Personal Access Tokens are available here: https://docs.github.com/en/free-pro-team@latest/github/authenticating-to-github/creating-a-personal-access-token
         # Full documentation for github upload-results step: https://codeql.github.com/docs/codeql-cli/manual/github-upload-results/
-        - task: CmdLine@3
+        - task: CmdLine@2
             displayName: Upload results to GitHub
             inputs:
                 script: "codeql github upload-results --sarif=.\temp\results-js.sarif --github-auth-stdin --github-url=https://github.com/ --repository=octo-org/example-repo-2 --ref=refs/heads/main --commit=deb275d2d5fe9a522a0b7bd8b6b6a1c939552718"
