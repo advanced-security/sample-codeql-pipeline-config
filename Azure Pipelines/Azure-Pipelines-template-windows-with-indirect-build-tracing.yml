@@ -31,7 +31,7 @@ stages:
         # The CodeQL bundle (containing the CodeQL CLI as well as the pre-compiled CodeQL Query Suites, which is recommended for CI/CD integration) can either be download as part of the pipeline,
         # or pre-downloaded and placed on the CI/CD build machine(s). If pre-downloading, replace \path\to\cli in subsequent stages with the absolute path to the download location.
         # In this example, we download the latest CLI bundle (at time of writing) as part of the pipeline from https://github.com/github/codeql-action/releases, extract it and place it on the PATH.
-        - task: PowerShell@1
+        - task: PowerShell@2
             displayName: Download CodeQL CLI Bundle
             inputs:
                 targetType: inline
@@ -47,7 +47,7 @@ stages:
         # Create a skeleton structure for a CodeQL database that doesn’t have a raw QL dataset yet, but is ready for running extractor steps
         # Prior to running any build commands, the generated scripts containing environment variables must be sourced.
         # Full documentation for database init step: https://codeql.github.com/docs/codeql-cli/manual/database-init/
-        - task: CmdLine@1
+        - task: CmdLine@2
             displayName: Initialize CodeQL database
             inputs:
                 # Assumes the source code is checked out to the current working directory.
@@ -85,7 +85,7 @@ stages:
            displayName: Visual Studio Build
 
         # Read and set the generated environment variables to end build tracing. This is done in PowerShell in this example.
-        - task: PowerShell@3
+        - task: PowerShell@2
            displayName: Clear CodeQL environment variables
            inputs:
               targetType: inline
@@ -113,7 +113,7 @@ stages:
         # Run a query suite (or some individual queries) against a CodeQL database, producing results, styled as alerts or paths, in SARIF or another interpreted format.
         # Note that the suite argument can accept one of the pre-compiled, out-of-the-box query suites: code-scanning, security-extended, or security-and-quality
         # Full documentation for database analyze step: https://codeql.github.com/docs/codeql-cli/manual/database-analyze/
-        - task: CmdLine@3
+        - task: CmdLine@2
             displayName: Analyze CodeQL Database
             inputs:
                 script: "codeql database analyze db csharp-security-and-quality.qls --format=sarif-latest --output=.\temp\results-csharp.sarif"
@@ -125,7 +125,7 @@ stages:
         # This token must have the security\_events scope.
         # Documentation for creating GitHub Apps or Personal Access Tokens are available here: https://docs.github.com/en/free-pro-team@latest/github/authenticating-to-github/creating-a-personal-access-token
         # Full documentation for github upload-results step: https://codeql.github.com/docs/codeql-cli/manual/github-upload-results/
-        - task: CmdLine@4
+        - task: CmdLine@2
             displayName: Upload results to GitHub
             inputs:
                 script: "codeql github upload-results --sarif=.\temp\results-csharp.sarif --github-auth-stdin --github-url=https://github.com/ --repository=octo-org/example-repo-2 --ref=refs/heads/main --commit=deb275d2d5fe9a522a0b7bd8b6b6a1c939552718"
