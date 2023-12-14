@@ -1,6 +1,16 @@
 # This sample YAML file shows how to configure an Azure Pipeline to analyze a repository using the CodeQL CLI Bundle
-# This example assumes a Windows environment and takes advantage of indirect build tracing ("sandwich mode") to leverage an existing set of build command
+#
+# It assumes a Windows environment and use indirect build tracing ("sandwich mode") around an existing set of build commands
+#
+# It requires:
+# - PowerShell Core to be on the Pipeline image
+# - a GitHub access token to be set in the pipeline Variables as a secret variable
+# - Advanced Security to be enabled on the GitHub repository
 
+# ℹ️ You will need to replace parts of this pipeline with your own triggers, preparatory Tasks and build Task, etc. marked with pointing hands 👉
+#    You may also wish to edit the query suite/language as appropriate on :164
+
+# ***** replace this 👇 with your actual triggers; these are just examples ******
 trigger:
     branches:
         include:
@@ -12,68 +22,95 @@ trigger:
         - lib/*
         include:
         - src/*
-  resources:
-      repositories:
-      - repository: templates
-          type: github
-          name: octo-org/example-repo-2
-          endpoint: octo-org
+# ***** replace this 👆 with your actual triggers; these are just examples ******
 
+# ***** replace this 👇 with your actual resources; these are just examples. This can be defined outside of the pipeline YAML ******
+resources:
+  repositories:
+  - repository: templates
+      type: github
+      name: octo-org/example-repo-2
+      endpoint: octo-org
+# ***** replace this 👆 with your actual resources; these are just examples. This can be defined outside of the pipeline YAML ******
+
+# ***** replace this 👆 with your real stage/job details; this is just an example ******
 stages:
 - stage: __default
     jobs:
     - job: Job
         workspace:
             clean: all
+        pool:
+          vmImage: 'windows-latest'  # 👈 replace this with your own required pool, ensuring that PowerShell Core is installed on the image
+# ***** replace this 👆 with your real stage/job details; this is just an example ******
+
         steps:
-
-        # OPTIONAL: Download CodeQL CLI Bundle
-        # The CodeQL bundle (containing the CodeQL CLI as well as the pre-compiled CodeQL Query Suites, which is recommended for CI/CD integration) can either be download as part of the pipeline,
-        # or pre-downloaded and placed on the CI/CD build machine(s). If pre-downloading, replace \path\to\cli in subsequent stages with the absolute path to the download location.
-        # In this example, we download the latest CLI bundle (at time of writing) as part of the pipeline from https://github.com/github/codeql-action/releases, extract it and place it on the PATH.
+        - checkout: self
+           fetchTags: true
+        
+        # Preparatory tasks
+        # These are outside of the CodeQL instrumentation
+        # ***** replace this 👇 with your actual pre-build tasks ******
         - task: PowerShell@2
-            displayName: Download CodeQL CLI Bundle
-            inputs:
-                targetType: inline
-                script: >
-                    wget https://github.com/github/codeql-action/releases/latest/download/codeql-bundle-win64.tar.gz -O ..\codeql-bundle-win64.tar.gz
-                    tar xzvf ..\codeql-bundle-win64.tar.gz -C ..\
-                    del ..\codeql-bundle-win64.tar.gz
-                    cd ..\; set PATH=%cd%\codeql;%PATH%
-            }
-        }
-
+          displayName: Pre-build task
+          inputs:
+            targetType: inline
+            pwsh: true
+            script: |
+                echo "Pre-build task"
+        # ***** replace this 👆 with your actual pre-build tasks ******
+        
+        # Download CodeQL
+        - task: PowerShell@2
+          displayName: Download CodeQL CLI Bundle
+          inputs:
+            targetType: inline
+            pwsh: true
+            script: |
+                Invoke-WebRequest https://github.com/github/codeql-action/releases/latest/download/codeql-bundle-win64.tar.gz -OutFile ../codeql-bundle-win64.tar.gz
+                tar xzvf ../codeql-bundle-win64.tar.gz -C ../
+                del ../codeql-bundle-win64.tar.gz
+                cd ../
+                $sep = [IO.Path]::DirectorySeparatorChar
+                echo "##vso[task.prependpath]${pwd}${sep}codeql"
+        
         # Initialize CodeQL
         # Create a skeleton structure for a CodeQL database that doesn’t have a raw QL dataset yet, but is ready for running extractor steps
         # Prior to running any build commands, the generated scripts containing environment variables must be sourced.
         # Full documentation for database init step: https://codeql.github.com/docs/codeql-cli/manual/database-init/
-        - task: CmdLine@2
-            displayName: Initialize CodeQL database
-            inputs:
-                # Assumes the source code is checked out to the current working directory.
-                # Creates a database at `<current working directory>/db`.
-                # Running on Windows, so specifies a trace process level.
-                script: "codeql database init --language csharp --trace-process-name Agent.Worker.exe --source-root . --begin-tracing db"
-
+        - task: PowerShell@2
+          displayName: Initialize CodeQL database
+          inputs:
+            # Assumes the source code is checked out to the current working directory.
+            # Creates a database at `<current working directory>/db`.
+            # Running on Windows, so specifies a trace process level.
+            targetType: inline
+            pwsh: true
+            script: |
+              codeql database init --language csharp --trace-process-name Agent.Worker.exe --source-root . --begin-tracing db
+        
         # Source environment variables
         # Read the generated environment variables and values, and set them so they are available for subsequent commands in the build pipeline. This is done in PowerShell in this example.
         - task: PowerShell@2
-           displayName: Set CodeQL environment variables
-           inputs:
-              targetType: inline
-              script: >
-                 $json = Get-Content $(System.DefaultWorkingDirectory)/db/temp/tracingEnvironment/start-tracing.json | ConvertFrom-Json
-                 $json.PSObject.Properties | ForEach-Object {
-                     $template = "##vso[task.setvariable variable="
-                     $template += $_.Name
-                     $template += "]"
-                     $template += $_.Value
-                     echo "$template"
-                 }
-
+          displayName: Set CodeQL environment variables
+          inputs:
+            targetType: inline
+            pwsh: true
+            script: |
+              $json = Get-Content $(System.DefaultWorkingDirectory)/db/temp/tracingEnvironment/start-tracing.json | ConvertFrom-Json
+              $json.PSObject.Properties | ForEach-Object {
+                  $template = "##vso[task.setvariable variable="
+                  $template += $_.Name
+                  $template += "]"
+                  $template += $_.Value
+                  echo "$template"
+              }
+        
         # Run build commands
+        # ***** replace this 👇 with your actual build command ******
         # In this example, we have a simple C# application built using VSBuild.
         - task: VSBuild@1
+            displayName: Visual Studio Build
             inputs:
               solution: '**/*.sln'
               # Disable MSBuild shared compilation for C# builds.
@@ -82,52 +119,63 @@ stages:
               configuration: Release
               # Execute a clean build, in order to remove any existing build artifacts prior to the build.
               clean: True
-           displayName: Visual Studio Build
-
+        # ***** replace this 👆 with your actual build command ******
+        
         # Read and set the generated environment variables to end build tracing. This is done in PowerShell in this example.
         - task: PowerShell@2
-           displayName: Clear CodeQL environment variables
-           inputs:
-              targetType: inline
-              script: >
-                 $json = Get-Content $(System.DefaultWorkingDirectory)/db/temp/tracingEnvironment/end-tracing.json | ConvertFrom-Json
-                 $json.PSObject.Properties | ForEach-Object {
-                     $template = "##vso[task.setvariable variable="
-                     $template += $_.Name
-                     $template += "]"
-                     $template += $_.Value
-                     echo "$template"
-                 }
-
+          displayName: Clear CodeQL environment variables
+          inputs:
+            targetType: inline
+            pwsh: true
+            script: |
+              $json = Get-Content $(System.DefaultWorkingDirectory)/db/temp/tracingEnvironment/end-tracing.json | ConvertFrom-Json
+              $json.PSObject.Properties | ForEach-Object {
+                  $template = "##vso[task.setvariable variable="
+                  $template += $_.Name
+                  $template += "]"
+                  $template += $_.Value
+                  echo "$template"
+              }
+        
         # Finalize CodeQL Database
         # Finalize a database that was created with codeql database init and subsequently seeded with analysis data using codeql database trace-command.
         # This needs to happen before the new database can be queried.
         # Full documentation for database finalize step: https://codeql.github.com/docs/codeql-cli/manual/database-finalize/
-        - task: CmdLine@2
-           displayName: Finalize CodeQL database
-           inputs:
-              script: 'codeql database finalize db'
-
+        - task: PowerShell@2
+          displayName: Finalize CodeQL database
+          inputs:
+            targetType: inline
+            pwsh: true
+            script: |
+              codeql database finalize db
+        
         # Analyze CodeQL Database
         # Analyze a CodeQL database, producing meaningful results in the context of the source code.
         # Run a query suite (or some individual queries) against a CodeQL database, producing results, styled as alerts or paths, in SARIF or another interpreted format.
         # Note that the suite argument can accept one of the pre-compiled, out-of-the-box query suites: code-scanning, security-extended, or security-and-quality
         # Full documentation for database analyze step: https://codeql.github.com/docs/codeql-cli/manual/database-analyze/
-        - task: CmdLine@2
-            displayName: Analyze CodeQL Database
-            inputs:
-                script: "codeql database analyze db csharp-security-and-quality.qls --format=sarif-latest --output=.\temp\results-csharp.sarif"
-
+        - task: PowerShell@2
+          displayName: Analyze CodeQL Database
+          inputs:
+            targetType: inline
+            pwsh: true
+            # edit the query suite/language as appropriate 👇
+            script: |
+              codeql database analyze db csharp-security-and-quality.qls --format=sarif-latest --output="$(Agent.TempDirectory)"/results-csharp.sarif
+        
         # Upload results to GitHub
         # Uploads a SARIF file to GitHub code scanning.
         # For context, please see https://docs.github.com/en/rest/reference/code-scanning#upload-an-analysis-as-sarif-data
-        # A GitHub Apps token or personal access token must be set. For best security practices, it is recommended to set the --github-auth-stdin flag and pass the token to the command through standard input. Alternatively, the GITHUB\_TOKEN environment variable can be set.
-        # This token must have the security\_events scope.
+        # A GitHub Apps token or personal access token must be set, by setting a secret Variable in the Azure DevOps Pipeline, called GITHUB_TOKEN
+        # This token must have the security_events scope, for classic tokens, or be given read & write "Code scanning alerts" permission for a fine-grained access token
         # Documentation for creating GitHub Apps or Personal Access Tokens are available here: https://docs.github.com/en/free-pro-team@latest/github/authenticating-to-github/creating-a-personal-access-token
         # Full documentation for github upload-results step: https://codeql.github.com/docs/codeql-cli/manual/github-upload-results/
-        - task: CmdLine@2
-            displayName: Upload results to GitHub
-            inputs:
-                script: "codeql github upload-results --sarif=.\temp\results-csharp.sarif --github-auth-stdin --github-url=https://github.com/ --repository=octo-org/example-repo-2 --ref=refs/heads/main --commit=deb275d2d5fe9a522a0b7bd8b6b6a1c939552718"
-
-        # Other tasks go here
+        - task: PowerShell@2
+          displayName: Upload results to GitHub
+          env:
+              GITHUB_TOKEN: $(GITHUB_TOKEN)
+          inputs:
+            targetType: inline
+            pwsh: true
+            script: |
+              codeql github upload-results --sarif="$(Agent.TempDirectory)"/results-csharp.sarif --github-url=https://github.com/ --repository="$(Build.Repository.Name)" --ref="$(Build.SourceBranch)" --commit="$(Build.SourceVersion)"
