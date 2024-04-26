@@ -26,6 +26,8 @@ pipeline {
     // The name of the GitHub repository to run the analysis on
     GITHUB_REPO = 'od-ctcampbell/demo-jenkins-1'
     CODEQL_LANGUAGE = 'java'
+    // See https://docs.github.com/en/code-security/codeql-cli/codeql-cli-manual/database-create#--build-modemode for build mode options
+    CODEQL_BUILD_MODE = 'manual'
     CODEQL_BUILD_COMMAND = './mvnw clean package -B'
     CODEQL_QUERY_SUITE = "codeql/${CODEQL_LANGUAGE}-queries:codeql-suites/${CODEQL_LANGUAGE}-security-extended.qls"
     // The Dependency Submission Action executable archive
@@ -56,7 +58,8 @@ pipeline {
             sh '/codeql/codeql database create ./codeql-db \
                 --language ${CODEQL_LANGUAGE} \
                 --overwrite \
-                --command "${CODEQL_BUILD_COMMAND}"'
+                "${CODEQL_BUILD_MODE:+--build-mode} ${CODEQL_BUILD_MODE}" \
+                "${CODEQL_BUILD_COMMAND:+--command} ${CODEQL_BUILD_COMMAND}"'
             sh '/codeql/codeql database analyze ./codeql-db \
                 --format=sarif-latest \
                 --output=codeql-results.sarif \
