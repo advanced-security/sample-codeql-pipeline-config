@@ -93,7 +93,7 @@ pipeline {
                 -H "X-GitHub-Api-Version: 2022-11-28" \
                 ${DEPENDENCY_SUBMISSION_EXECUTABLES_URL} \
                 -o executables.zip'
-            sh 'unzip -o executables.zip'
+            sh 'unzip executables.zip'
             sh 'chmod +x ./${DEPENDENCY_SUBMISSION_EXECUTABLE}'
             sh 'PATH=./:$PATH ./${DEPENDENCY_SUBMISSION_EXECUTABLE} \
                 -r ${GITHUB_REPO} \
