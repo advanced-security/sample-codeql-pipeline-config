@@ -18,7 +18,7 @@ pipeline {
 
   environment {
     // The Jenkins Credentials ID (as a secret text credential) for your GitHub PAT. The PAT needs `repo` scope.
-    GITHUB_CREDS = credentials('c066da44-44dd-4188-b000-e6e63d42dffb')
+    GITHUB_CREDS = credentials('github-pat')
     // The repo default branch name
     DEFAULT_BRANCH = 'main'
     // The type of ref that will be checked out for a job initiated by a GitHub PR. 'merge' for the default PR merge commit, 'head' for the head of the branch being merged.
@@ -26,14 +26,16 @@ pipeline {
     PR_REF = getPRRef()
     // The name of the GitHub repository to run the analysis on
     GITHUB_REPO = 'od-ctcampbell/demo-jenkins-1'
+    // See https://docs.github.com/en/code-security/code-scanning/creating-an-advanced-setup-for-code-scanning/customizing-your-advanced-setup-for-code-scanning#changing-the-languages-that-are-analyzed
+    // for supported languages.
+    // For Java and Kotlin use 'java', for JavaScript and TypeScript use 'javascript', for C and C++ use 'cpp'.
     CODEQL_LANGUAGE = 'java'
     // See https://docs.github.com/en/code-security/codeql-cli/codeql-cli-manual/database-create#--build-modemode for build mode options
     CODEQL_BUILD_MODE = 'manual'
     CODEQL_BUILD_COMMAND = './mvnw clean package -B'
     CODEQL_QUERY_SUITE = "codeql/${CODEQL_LANGUAGE}-queries:codeql-suites/${CODEQL_LANGUAGE}-security-extended.qls"
     CODEQL_BUNDLE_URL = 'https://github.com/github/codeql-action/releases/latest/download/codeql-bundle-linux64.tar.gz'
-    CODEQL_BIN_DIR = '/codeql'
-    PATH = "${CODEQL_BIN_DIR}:$PATH"
+    CODEQL_DIR = './codeql'
     // The Dependency Submission Action executable archive
     // See https://github.com/advanced-security/maven-dependency-submission-action/actions/workflows/publish_executables.yml?query=branch:main for the latest version.
     // Latest at last edit: https://github.com/advanced-security/maven-dependency-submission-action/actions/runs/8876993169/artifacts/1456204717
@@ -54,26 +56,27 @@ pipeline {
             }
           }
           steps {
-            sh 'echo $PATH'
-            // sh 'rm -rf ${CODEQL_BIN_DIR} && mkdir ${CODEQL_BIN_DIR}'
-            // sh 'wget -q ${CODEQL_BUNDLE_URL} -O codeql-bundle.tar.gz'
-            // sh 'tar xzf codeql-bundle.tar.gz -C ${CODEQL_BIN_DIR}/'
-            // sh 'rm codeql-bundle.tar.gz'
-            sh '${CODEQL_BIN_DIR}/codeql database create ./codeql-db \
-                --language ${CODEQL_LANGUAGE} \
-                --overwrite \
-                ${CODEQL_BUILD_MODE:+--build-mode} ${CODEQL_BUILD_MODE} \
-                ${CODEQL_BUILD_COMMAND:+--command} "${CODEQL_BUILD_COMMAND}"'
-            sh '${CODEQL_BIN_DIR}/codeql database analyze ./codeql-db \
-                --format=sarif-latest \
-                --output=codeql-results.sarif \
-                ${CODEQL_QUERY_SUITE}'
-            sh 'echo $GITHUB_CREDS | ${CODEQL_BIN_DIR}/codeql github upload-results \
-                --github-auth-stdin \
-                --sarif=codeql-results.sarif \
-                --repository=${GITHUB_REPO} \
-                --ref=${PR_REF} \
-                --commit=${GIT_COMMIT}'
+            script {
+              sh 'rm -rf ${CODEQL_DIR} && mkdir -p ${CODEQL_DIR}'
+              sh 'curl -L -sS -o codeql-bundle.tar.gz -s ${CODEQL_BUNDLE_URL}'
+              sh 'tar --strip-components=1 -xzf codeql-bundle.tar.gz -C ${CODEQL_DIR}/'
+              sh 'rm codeql-bundle.tar.gz'
+              sh '${CODEQL_DIR}/codeql database create ./codeql-db \
+                  --language ${CODEQL_LANGUAGE} \
+                  --overwrite \
+                  ${CODEQL_BUILD_MODE:+--build-mode} ${CODEQL_BUILD_MODE} \
+                  ${CODEQL_BUILD_COMMAND:+--command} "${CODEQL_BUILD_COMMAND}"'
+              sh '${CODEQL_DIR}/codeql database analyze ./codeql-db \
+                  --format=sarif-latest \
+                  --output=codeql-results.sarif \
+                  ${CODEQL_QUERY_SUITE}'
+              sh 'echo $GITHUB_CREDS | ${CODEQL_DIR}/codeql github upload-results \
+                  --github-auth-stdin \
+                  --sarif=codeql-results.sarif \
+                  --repository=${GITHUB_REPO} \
+                  --ref=${PR_REF} \
+                  --commit=${GIT_COMMIT}'
+            }
           }
         }
         stage('Submit dependency snapshot') {
@@ -84,7 +87,7 @@ pipeline {
             }
           }
           steps {
-            sh 'curl -L -s \
+            sh 'curl -L -sS \
                 -H "Accept: application/vnd.github+json" \
                 -H "Authorization: Bearer ${GITHUB_CREDS}" \
                 -H "X-GitHub-Api-Version: 2022-11-28" \
