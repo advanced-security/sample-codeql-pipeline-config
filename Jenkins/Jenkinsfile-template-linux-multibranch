@@ -37,7 +37,10 @@ pipeline {
     CODEQL_BUILD_COMMAND = './mvnw clean package'
     CODEQL_QUERY_SUITE = "codeql/${CODEQL_LANGUAGE}-queries:codeql-suites/${CODEQL_LANGUAGE}-security-extended.qls"
     // CODEQL_BUNDLE_URL = 'https://github.com/github/codeql-action/releases/latest/download/codeql-bundle-linux64.tar.gz'
+    // Path to CodeQL bundle folder. If using the curl download option below this is the extraction location.
+    // It is recommended to provide CodeQL via a pre-populated tool cache directory rather than download during the pipeline execution. 
     CODEQL_DIR = '/tools/codeql'
+    // Memory limit for CodeQL, this must be set to less than the pod limit if running in Kubernetes, approx 80% of the limit is appropriate. 
     CODEQL_MEMORY = '3276'
     // The Dependency Submission Action executable archive
     // See https://github.com/advanced-security/maven-dependency-submission-action/actions/workflows/publish_executables.yml?query=branch:main for the latest version.
