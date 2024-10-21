@@ -41,7 +41,7 @@ There are examples/guidance for:
 2. Copy the relevant pipeline file from this repository into your repository
 3. [Update the pipeline file with your required settings](https://docs.github.com/en/enterprise-cloud@latest/code-security/code-scanning/using-codeql-code-scanning-with-your-existing-ci-system/configuring-codeql-cli-in-your-ci-system)
     * read the [creating CodeQL database documentation for help](https://codeql.github.com/docs/codeql-cli/manual/database-create/)
-    * the [full CodeQL CLI documenation](https://docs.github.com/en/enterprise-cloud@latest/code-security/codeql-cli/using-the-codeql-cli/about-the-codeql-cli) may also be useful
+    * the [full CodeQL CLI documentation](https://docs.github.com/en/enterprise-cloud@latest/code-security/codeql-cli/using-the-codeql-cli/about-the-codeql-cli) may also be useful
 
 ## License
 
