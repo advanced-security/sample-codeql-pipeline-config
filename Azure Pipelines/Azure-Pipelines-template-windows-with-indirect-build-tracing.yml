@@ -84,6 +84,7 @@ stages:
             # Assumes the source code is checked out to the current working directory.
             # Creates a database at `<current working directory>/db`.
             # Running on Windows, so specifies a trace process level.
+            # Alternatively, pass the flag --trace-process-mode=azure-pipelines to codeql database init to trace a build command in a pipeline job that runs in a Windows container. It will also do the right thing for a pipeline job on Windows that does not run in a container.
             targetType: inline
             pwsh: true
             script: |
