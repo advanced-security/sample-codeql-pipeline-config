@@ -1,0 +1,359 @@
+# CodeQL Analysis Template for Azure Pipelines
+#
+# This template runs CodeQL analysis on a GitHub repository within Azure Pipelines.
+# It handles downloading the CodeQL bundle (if not installed in tools cache), database creation, analysis, and result upload.
+#
+# If the agent already has CodeQL bundled in installation tools directory it will use it, otherwise downloads the latest codeql bundle
+# and uses it.
+#
+# REQUIREMENTS:
+# - GitHub repository
+# - bash and powershell if agent is windows
+# - GitHub token (PAT or GitHub App token) with code scanning write permissions
+#
+# USAGE EXAMPLE:
+# ```yaml
+# - template: templates/codeql-template.yml
+#   parameters:
+#     language: 'javascript'
+#     query: 'security-extended'
+#    packs:
+#      - 'githubsecuritylab/codeql-java-queries'
+#     buildmode: 'autobuild'
+#     token: $(githubtoken)
+# ```
+
+parameters:
+  # Required parameters
+  - name: language
+    type: string
+    displayName: Programming language to analyze
+
+  - name: token
+    type: string
+    displayName: GitHub token for authentication (at least code scanning write permissions)
+
+  # Optional parameters with defaults
+  - name: query
+    type: string
+    displayName: CodeQL query suite to run
+    default: security-extended
+
+  - name: packs
+    type: object
+    displayName: Additional CodeQL packs to run (only supports non-authenticated registries)
+    default: []
+
+  - name: buildmode
+    type: string
+    displayName: Build mode (autobuild, manual, or none)
+    default: autobuild
+    values:
+      - autobuild
+      - manual
+      - none
+
+  - name: manualbuildsteps
+    type: stepList
+    displayName: Custom build steps (only used if buildmode=manual)
+    default:
+      []
+
+  # Resource configuration
+  - name: codeqlThreads
+    type: number
+    default: 0
+    displayName: Threads to use for CodeQL (0=auto)
+
+  - name: codeqlMemory
+    type: number
+    default: 5500
+    displayName: Memory limit for CodeQL in MB
+
+steps:
+# Validation step
+- bash: |
+    # Check if repository is hosted on GitHub
+    if [ "$(Build.Repository.Provider)" != 'GitHub' ]; then
+      echo '##[error]This template only supports GitHub repositories'
+      exit 1
+    fi
+
+    # Check if GitHub token is provided
+    if [ -z "${{ parameters.token }}" ]; then
+      echo '##[error]GitHub token is required for authentication'
+      exit 1
+    fi
+
+    if [[ ! "${{ parameters.token }}" =~ ^gh ]]; then
+      echo '##[warning]The provided token does not start with "gh", so it is probably not a valid gh token (this might fail later when token is used).'
+    fi
+
+    # Check if language is provided
+    if [ -z "${{ parameters.language }}" ]; then
+      echo '##[error]Language parameter is required'
+      exit 1
+    fi
+
+    if [ -z "${{ parameters.buildmode }}" ]; then
+      echo '##[error]Build mode parameter is required'
+      exit 1
+    fi
+
+    # Extract GitHub organization/owner name
+    githubowner=$(echo "$(Build.Repository.Name)" | cut -d'/' -f1)
+    echo "##vso[task.setvariable variable=githubowner]$githubowner"
+
+    echo "GitHub Owner: $githubowner"
+    echo "Repository: $(Build.Repository.Name)"
+  displayName: 'Validate Inputs'
+
+# Setup CodeQL environment
+- bash: |
+    set -e
+    echo "Configuration Summary:"
+    echo "======================"
+    echo "Language:   ${{ parameters.language }}"
+    echo "Build mode: ${{ parameters.buildmode }}"
+    echo "Query:      ${{ parameters.query }}"
+    echo "Packs:      ${{ join(',', parameters.packs) }}"
+    echo "Threads:    ${{ parameters.codeqlThreads }}"
+    echo "Memory:     ${{ parameters.codeqlMemory }} MB"
+    echo "======================"
+
+    # Setup CodeQL directories
+    codeqlDbDir="${AGENT_TEMPDIRECTORY}/ghas.codeql"
+    sarifDir="${AGENT_TEMPDIRECTORY}/out"
+
+    rm -rf "${codeqlDbDir}" "${sarifDir}"
+    mkdir -p "${codeqlDbDir}" "${sarifDir}"
+
+    cli_extension=""
+    case "${AGENT_OS}" in
+      "Windows_NT")
+        bundle_name="codeql-bundle-win64.tar.gz"
+        cli_extension=".exe"
+      ;;
+      "Linux")
+        bundle_name="codeql-bundle-linux64.tar.gz"
+      ;;
+      "Darwin")
+        bundle_name="codeql-bundle-osx64.tar.gz"
+      ;;
+    esac
+
+    echo "checking if bundle is on tools folder"
+
+    if [ -d "$(Agent.ToolsDirectory)/CodeQL" ]; then
+      echo "##[group]Checking tools directory"
+      codeql_path=$(find "$(Agent.ToolsDirectory)/CodeQL" -name "codeql${cli_extension}" -type f -maxdepth 4 | sort -r | head -n 1)
+      echo "Found CodeQL binary: ${codeql_path}"
+      if [ ! -z "$codeql_path" ]; then
+        cli_path=$(dirname "$codeql_path")
+        echo "Using cached bundle in ${cli_path}"
+      else
+        echo "##vso[task.logissue type=error]CodeQL binary not found in tools cache"
+        echo "##[endgroup]"
+        exit 1
+      fi
+      echo "##[endgroup]"
+    else
+      echo "##[group]Downloading Bundle ${bundle_name}"
+
+      codeql_path="${AGENT_TEMPDIRECTORY}/codeql"
+      bundle_path="${codeql_path}/${bundle_name}"
+
+      mkdir -p "${codeql_path}"
+
+      echo "Will use ${codeql_path} to store the bundle"
+      echo "Downloading bundle to ${bundle_path}"
+
+      if ! curl -L -o "${bundle_path}" \
+        --retry 2 \
+        --max-time 60 \
+        --progress-bar \
+        "https://github.com/github/codeql-action/releases/latest/download/${bundle_name}"; then
+
+        echo "##vso[task.logissue type=error]Failed to download CodeQL bundle"
+        echo "##[endgroup]"
+        exit 1
+      fi
+
+      cli_path="${codeql_path}/codeql"
+
+      # in windows patches paths to a path that tar can process (it can't handle c:\XXX format)
+      if [ "${AGENT_OS}" = "Windows_NT" ]; then
+        # check if cygpath is installed
+        path_tool=cygpath
+        if ! command -v "${path_tool}" &> /dev/null; then
+          # use wslpath instead
+          path_tool=wslpath
+        fi
+        bundle_path=$($path_tool -u "${bundle_path}")
+        codeql_path=$($path_tool -u "${codeql_path}")
+      fi
+
+      echo "untaring bundle ${bundle_path}"
+      if ! tar xzf "${bundle_path}" -C "${codeql_path}" > /dev/null; then
+        echo "##vso[task.logissue type=error]Failed to extract CodeQL bundle"
+        echo "##[endgroup]"
+        exit 1
+      fi
+
+      echo "removing bundle tar file ${bundle_path}"
+      rm -f "${bundle_path}"
+
+      echo "##[endgroup]"
+    fi
+
+    echo "##vso[task.prependpath]$cli_path"
+
+    echo ""
+    echo "Prepending CLI to Path: ${cli_path}"
+    echo "Setting CodeQL DB path ${codeqlDbDir}"
+    echo "Setting SARIF path ${sarifDir}"
+
+    echo "##vso[task.setvariable variable=CODEQLDB_PATH]${codeqlDbDir}"
+    echo "##vso[task.setvariable variable=SARIF_PATH]${sarifDir}"
+  displayName: Setup CodeQL Runtime
+
+
+# Verify CodeQL installation
+- bash: |
+    echo "Verifying CodeQL installation..."
+    if ! codeql --version; then
+      echo "##vso[task.logissue type=error]Failed to verify CodeQL installation"
+      exit 1
+    fi
+    # Display pack and language info in debug mode
+    if [ "$SYSTEM_DEBUG" = "true" ]; then
+      echo "Checking available packs and languages..."
+      codeql resolve packs
+      codeql resolve languages
+    fi
+  displayName: 'Verify CodeQL Installation'
+
+# CodeQL Database Creation - non manual mode mode
+- ${{ if ne(parameters.buildmode, 'manual') }}:
+  - bash: |
+      echo "Creating CodeQL database using ${{ parameters.buildmode }} mode"
+      echo "Language: ${{ parameters.language }}"
+
+      codeql database create "$(CODEQLDB_PATH)" \
+        --language=${{ parameters.language }} \
+        --build-mode="${{ parameters.buildmode }}" \
+        --no-run-unnecessary-builds \
+        --threads=${{ parameters.codeqlThreads }} \
+        --ram=${{ parameters.codeqlMemory }}
+    displayName: 'Create CodeQL Database (${{ parameters.buildmode }})'
+
+# CodeQL Database Creation - Manual mode for Unix
+- ${{ if eq(parameters.buildmode, 'manual') }}:
+  - bash: |
+      echo "Initializing CodeQL database for manual tracing"
+      echo "Language: ${{ parameters.language }}"
+
+      codeql database init "$(CODEQLDB_PATH)" \
+        --language="${{ parameters.language }}" \
+        --source-root="$(Build.SourcesDirectory)" \
+        --trace-process-mode=azure-pipelines \
+        --begin-tracing
+    condition: and(succeeded(), or(eq(variables['Agent.OS'], 'Linux'), eq(variables['Agent.OS'], 'Darwin')))
+    displayName: '[Unix] Initialize CodeQL Database'
+
+  - bash: |
+      # Export tracing environment variables to the pipeline
+      echo "Starting CodeQL tracing..."
+      env_before=$(printenv | cut -d '=' -f 1 | sort)
+      . $(CODEQLDB_PATH)/temp/tracingEnvironment/start-tracing.sh
+      env_after=$(printenv | cut -d '=' -f 1 | sort)
+
+      # Pass environment variables to Azure Pipelines
+      comm -13 <(echo "$env_before") <(echo "$env_after") | while read -r env_name; do
+          echo "##vso[task.setvariable variable=$env_name;]${!env_name}"
+      done
+
+      echo "CodeQL tracing enabled"
+    condition: and(succeeded(), or(eq(variables['Agent.OS'], 'Linux'), eq(variables['Agent.OS'], 'Darwin')))
+    displayName: '[Unix] Enable CodeQL Tracing'
+
+# CodeQL Database Creation - Manual mode for Windows
+- ${{ if eq(parameters.buildmode, 'manual') }}:
+  - powershell: |
+      Write-Host "Initializing CodeQL database for manual tracing"
+      Write-Host "Language: ${{ parameters.language }}"
+
+      codeql database init "$(CODEQLDB_PATH)" `
+        --language="${{ parameters.language }}" `
+        --source-root="$(Build.SourcesDirectory)" `
+        --trace-process-mode=azure-pipelines `
+        --begin-tracing
+    condition: and(succeeded(), eq(variables['Agent.OS'], 'Windows_NT'))
+    displayName: '[Windows] Initialize CodeQL Database'
+
+  - powershell: |
+      Write-Host "Starting CodeQL tracing..."
+      $json = (Get-Content $Env:CODEQLDB_PATH/temp/tracingEnvironment/start-tracing.json | ConvertFrom-Json)
+      $json.PSObject.Properties | ForEach-Object {
+          Write-Host "##[debug]Setting environment variable: $($_.Name)"
+          Write-Host "##vso[task.setvariable variable=$($_.Name)]$($_.Value)"
+      }
+
+      Write-Host "CodeQL tracing enabled"
+    condition: and(succeeded(), eq(variables['Agent.OS'], 'Windows_NT'))
+    displayName: '[Windows] Enable CodeQL Tracing'
+
+# Execute custom build steps for manual mode
+- ${{ if eq(parameters.buildmode, 'manual') }}:
+  - ${{ each step in parameters.manualbuildsteps }}:
+    - ${{ step }}
+
+# Finalize database for manual mode
+- ${{ if eq(parameters.buildmode, 'manual') }}:
+  - bash: |
+      echo "Finalizing CodeQL database..."
+      codeql database finalize "$(CODEQLDB_PATH)"
+    displayName: 'Finalize CodeQL Database'
+
+# Download additional CodeQL packs
+- ${{ if gt(length(parameters.packs), 0) }}:
+  - ${{ each pack in parameters.packs }}:
+    - bash: |
+        echo "Downloading CodeQL pack: ${{ pack }}"
+        codeql pack download "${{ pack }}"
+      displayName: 'Download CodeQL Pack: ${{ pack }}'
+
+# Run CodeQL analysis
+- bash: |
+    echo "Running CodeQL analysis for ${{ parameters.language }}..."
+
+    # Prepare packs parameter if any packs specified
+    packs_array=(${{ join(' ', parameters.packs) }})
+    packs_list="${packs_array[@]}"
+
+    # Run analysis
+    codeql database analyze "$(CODEQLDB_PATH)" \
+      ${{ parameters.language }}-${{ parameters.query }} ${packs_list} \
+      --format=sarif-latest \
+      --output="$(SARIF_PATH)/${{ parameters.language }}.sarif" \
+      --sarif-category="language:${{ parameters.language }}" \
+      --threads=${{ parameters.codeqlThreads }} \
+      --ram=${{ parameters.codeqlMemory }} \
+      --verbosity=progress
+
+    echo "CodeQL analysis complete. Results saved to: $(SARIF_PATH)/${{ parameters.language }}.sarif"
+  displayName: 'Run CodeQL Analysis'
+
+# Upload results to GitHub
+- bash: |
+    echo "Uploading CodeQL results to GitHub..."
+    echo "$GH_TOKEN" | codeql github upload-results --github-auth-stdin \
+      --repository="$(Build.Repository.Name)" \
+      --sarif="$(SARIF_PATH)/${{ parameters.language }}.sarif" \
+      --commit $(Build.SourceVersion) \
+      --ref $(Build.SourceBranch)
+
+    echo "CodeQL results uploaded successfully for $(Build.Repository.Name)"
+  displayName: 'Upload CodeQL Results'
+  env:
+    GH_TOKEN: ${{ parameters.token }}
