@@ -346,6 +346,7 @@ steps:
 
 # Upload results to GitHub
 - bash: |
+    set -e
     echo "Uploading CodeQL results to GitHub..."
     echo "$GH_TOKEN" | codeql github upload-results --github-auth-stdin \
       --repository="$(Build.Repository.Name)" \
