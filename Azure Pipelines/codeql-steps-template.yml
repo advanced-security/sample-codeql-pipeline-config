@@ -86,7 +86,7 @@ steps:
     fi
 
     if [[ ! "${{ parameters.token }}" =~ ^gh ]]; then
-      echo '##[warning]The provided token does not start with "gh", so it is probably not a valid gh token (this might fail later when token is used).'
+      echo '##[warning]The provided token does not start with "gh", so it is probably not a valid GitHub token (this might fail later when the token is used).'
     fi
 
     # Check if language is provided
