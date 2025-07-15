@@ -98,7 +98,7 @@ This example besides using the `security-extended` query suite, it uses two quer
 
 For compiled languages you can use `autobuild` for the `buildMode` or for compiled languages that can be scanned without being built (eg: Java or .Net).
 
-If your code can't be scanned in autobuild or build mode none, you can set the `buildMode` to `manual` define the build steps in the `manualbuildSteps` parameter.
+If your code can't be scanned in autobuild or build mode none, you can set the `buildMode` to `manual` and define the build steps in the `manualbuildSteps` parameter.
 
 ```yaml
   - checkout: self
