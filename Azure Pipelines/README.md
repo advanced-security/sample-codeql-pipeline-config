@@ -71,7 +71,7 @@ The [codeql-steps-template.yml](codeql-steps-template.yml) is a reusable steps t
 
 The template works on Linux, MacOS and Windows.
 
-To use this template in your existing pipeline, you need to reference (after storing it ona central repository or the code repository for simpler cases).
+To use this template in your existing pipeline, you need to reference (after storing it on a central repository or the code repository for simpler cases).
 
 ### Examples
 
