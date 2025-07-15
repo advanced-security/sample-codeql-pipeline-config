@@ -17,7 +17,7 @@
 #   parameters:
 #     language: 'javascript'
 #     query: 'security-extended'
-#    packs:
+#     packs:
 #      - 'githubsecuritylab/codeql-java-queries'
 #     buildmode: 'autobuild'
 #     token: $(githubtoken)
