@@ -1,0 +1,729 @@
+# This sample YAML file demonstrates how to configure an Azure Pipeline to perform
+# incremental CodeQL analysis using two complementary techniques:
+#
+# 1. Overlay analysis: Speeds up database creation and query evaluation by reusing
+#    a cached "overlay-base" database from the default branch. Only changed files
+#    are re-extracted, and unchanged query results are reused from the cache.
+#
+# 2. Diff-informed analysis: Restricts alert reporting to lines that were added
+#    or modified in the pull request, reducing noise and improving relevance.
+#
+# Together these techniques can cut PR scan times by up to 10x for large codebases.
+#
+# Pipeline behaviour
+# ──────────────────
+# Push to default branch  →  Stage 1 (OverlayBaseScan)
+#   Full CodeQL scan with --overlay-base.  The database (with its preserved query
+#   cache) is published as a pipeline artifact for subsequent PR builds to reuse.
+#
+# Pull request             →  Stage 2 (IncrementalPRScan)
+#   Downloads the latest overlay-base artifact from the target branch, computes
+#   changed files, builds a lightweight overlay database, and runs queries restricted
+#   to the diff ranges.  Automatically falls back to a full scan when no artifact
+#   exists yet (e.g. the very first PR before any push-to-default-branch run).
+#
+# When to use this template
+# ─────────────────────────
+# Use this template when your repository is stored in GitHub and you run CodeQL
+# from an Azure DevOps pipeline.  For repositories hosted in Azure Repos, see:
+# https://learn.microsoft.com/en-us/azure/devops/repos/security/github-advanced-security-code-scanning
+#
+# Requirements
+# ────────────
+# • CodeQL CLI Bundle 2.23.8+ (2.23.9+ for JavaScript, Python, or Ruby)
+#   Per-language minimums:
+#   https://docs.github.com/en/code-security/how-tos/find-and-fix-code-vulnerabilities/scan-from-the-command-line/incremental-analysis#minimum-cli-bundle-versions
+# • Git 2.38.0+ on the build agent (needed by overlay analysis for git ls-files --format)
+# • All source files tracked by Git (none in .gitignore)
+# • GITHUB_TOKEN pipeline variable set as a secret
+#   Classic PAT scope:       repo (security_events)
+#   Fine-grained PAT scope:  Code scanning alerts (read and write)
+#
+# Documentation
+# ─────────────
+# Full incremental analysis guide:
+# https://docs.github.com/en/code-security/how-tos/find-and-fix-code-vulnerabilities/scan-from-the-command-line/incremental-analysis
+
+# Trigger on every push to the default branch so a fresh overlay-base database
+# is built and cached after each merge.  Adapt branch names to your project.
+trigger:
+  branches:
+    include:
+    - main
+
+# Trigger incremental analysis on every pull request targeting the default branch.
+pr:
+  branches:
+    include:
+    - '*'
+
+variables:
+  # Language to scan.
+  # Possible values: cpp, csharp, go, java, javascript, python, ruby, swift
+  # NOTE: Overlay analysis requires build-mode: none.  Compiled languages (except Go)
+  # are not supported by overlay mode.  For compiled languages use the standard
+  # Azure-Pipelines-template-linux.yml or the indirect-build-tracing variant.
+  language: javascript
+
+  # ── Internal pipeline paths (no need to change these) ─────────────────────
+  _codeqlBundleDir: $(Pipeline.Workspace)/codeql-bundle
+  _codeqlDbPath:    $(Pipeline.Workspace)/codeql-db
+  _codeqlOidsFile:  $(Pipeline.Workspace)/codeql-oids.json
+  _overlayChanges:  $(Pipeline.Workspace)/overlay-changes.json
+  _diffRangesFile:  $(Pipeline.Workspace)/diff-ranges.json
+  _extPacksRoot:    $(Pipeline.Workspace)/codeql-packs
+  _sarifFile:       $(Pipeline.Workspace)/codeql-results.sarif
+  _codeqlConfig:    $(Pipeline.Workspace)/codeql-config/code-scanning-config.yml
+
+
+# ==============================================================================
+# STAGE 1 – Default branch push: Full scan + build overlay-base database
+#
+# This stage runs on every push to the default branch (never on pull requests).
+# It performs a complete CodeQL scan using --overlay-base mode, which annotates
+# the database with the intermediate query-evaluation cache needed by future
+# incremental PR builds.
+#
+# After analysis the database is published as a named pipeline artifact so that
+# pull-request builds can download it and run overlay analysis.
+# ==============================================================================
+stages:
+- stage: OverlayBaseScan
+  displayName: 'CodeQL: Full Scan (Overlay Base)'
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+  jobs:
+  - job: CodeQLOverlayBase
+    displayName: Build overlay-base database and upload full scan results
+    pool:
+      vmImage: ubuntu-latest
+    workspace:
+      clean: all
+    steps:
+
+    # ── Download the CodeQL CLI Bundle ─────────────────────────────────────
+    # For overlay analysis you must use at least version 2.23.8 (general) or
+    # 2.23.9 (JavaScript / Python / Ruby).  Pin the URL to a specific release
+    # tag in production to guarantee reproducible builds, e.g.:
+    # https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.23.9/codeql-bundle-linux64.tar.gz
+    - script: |
+        set -euo pipefail
+        mkdir -p "$(_codeqlBundleDir)"
+
+        echo "Downloading CodeQL CLI Bundle..."
+        wget https://github.com/github/codeql-action/releases/latest/download/codeql-bundle-linux64.tar.gz \
+          -O "$(_codeqlBundleDir)/codeql-bundle-linux64.tar.gz" \
+          --quiet
+
+        tar xzf "$(_codeqlBundleDir)/codeql-bundle-linux64.tar.gz" \
+          -C "$(_codeqlBundleDir)/"
+        rm "$(_codeqlBundleDir)/codeql-bundle-linux64.tar.gz"
+
+        echo "##vso[task.prependpath]$(_codeqlBundleDir)/codeql"
+        echo "CodeQL CLI installed."
+        "$(_codeqlBundleDir)/codeql/codeql" --version
+      displayName: Download CodeQL CLI Bundle
+
+    # ── Initialise the database in overlay-base mode ───────────────────────
+    # --overlay-base  creates a database structure whose intermediate
+    #                 query-evaluation results will be preserved for reuse.
+    # --db-cluster    required when --overlay-base is used; stores each
+    #                 language in a sub-directory: $(_codeqlDbPath)/$(language)/
+    - script: |
+        set -euo pipefail
+        codeql database init \
+          --overlay-base \
+          --db-cluster \
+          --language=$(language) \
+          --source-root=$(Build.SourcesDirectory) \
+          $(_codeqlDbPath)
+      displayName: Initialize CodeQL database (overlay-base mode)
+
+    # ── Extract the source code ────────────────────────────────────────────
+    # For interpreted languages (JavaScript, Python, Ruby) CodeQL extracts
+    # source files automatically during database finalization — no build
+    # command is needed.
+    #
+    # For compiled languages that support build-mode: none (e.g. Java, C#):
+    # replace this step with the appropriate build command and tracing setup,
+    # or use codeql database trace-command.
+    #
+    # Note: overlay analysis only supports build-mode: none.  Go is handled
+    # specially by the CodeQL CLI and works with overlay despite being compiled.
+    - script: |
+        set -euo pipefail
+        codeql database finalize \
+          $(_codeqlDbPath)/$(language)
+      displayName: Finalize CodeQL database (extract source code)
+
+    # ── Record Git OIDs for all tracked files ─────────────────────────────
+    # This snapshot is stored alongside the database.  Pull-request builds
+    # compare their working-tree OIDs against this snapshot to determine
+    # exactly which files changed and must be re-analyzed.
+    # Requires Git 2.38.0+ for the --format option.
+    - script: |
+        python3 - <<'PYEOF'
+        import subprocess, json, os, sys
+
+        source_dir  = os.environ["BUILD_SOURCESDIRECTORY"]
+        oids_file   = os.environ["_CODEQLOIDS_FILE"]
+
+        result = subprocess.run(
+            ["git", "ls-files", "--recurse-submodules",
+             "--format=%(objectname)_%(path)"],
+            capture_output=True, text=True, cwd=source_dir, check=True,
+        )
+
+        oids = {}
+        for line in result.stdout.splitlines():
+            if "_" in line:
+                oid, path = line.split("_", 1)
+                oids[path] = oid
+
+        os.makedirs(os.path.dirname(oids_file), exist_ok=True)
+        with open(oids_file, "w") as fh:
+            json.dump(oids, fh)
+
+        print(f"Recorded OIDs for {len(oids)} tracked files.")
+        PYEOF
+      env:
+        BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)
+        _CODEQLOIDS_FILE: $(_codeqlOidsFile)
+      displayName: Record Git OIDs (overlay change detection snapshot)
+
+    # ── Run CodeQL queries ─────────────────────────────────────────────────
+    # IMPORTANT: do NOT pass --expect-discarded-cache here.
+    # The cached intermediate results are what makes future PR overlay builds
+    # fast.  Discarding them would negate the performance benefit.
+    - script: |
+        set -euo pipefail
+        codeql database run-queries \
+          $(_codeqlDbPath)/$(language) \
+          $(language)-security-and-quality.qls
+      displayName: Run CodeQL queries (preserve cache for overlay)
+
+    # ── Generate SARIF output ──────────────────────────────────────────────
+    - script: |
+        set -euo pipefail
+        codeql database interpret-results \
+          --format=sarif-latest \
+          --sarif-category="$(language)" \
+          --sarif-add-baseline-file-info \
+          --output=$(_sarifFile) \
+          $(_codeqlDbPath)/$(language) \
+          $(language)-security-and-quality.qls
+      displayName: Interpret CodeQL results (generate SARIF)
+
+    # ── Clean up the database for caching ─────────────────────────────────
+    # The 'overlay' cleanup level preserves significantly more cached data
+    # than the default 'clear' level.  This preserved cache is what allows
+    # overlay PR builds to skip re-evaluating queries on unchanged files.
+    # Must be called BEFORE publishing/caching the database.
+    - script: |
+        set -euo pipefail
+        codeql database cleanup \
+          $(_codeqlDbPath) \
+          --cache-cleanup=overlay
+      displayName: Cleanup database (preserve overlay cache)
+
+    # ── Embed the OIDs snapshot inside the database directory ─────────────
+    # Storing the OIDs file alongside the database ensures both travel
+    # together when the artifact is downloaded by a PR build.
+    - script: |
+        cp $(_codeqlOidsFile) $(_codeqlDbPath)/codeql-oids.json
+      displayName: Embed OIDs snapshot into database artifact
+
+    # ── Publish the overlay-base database as a pipeline artifact ──────────
+    # PR builds on this pipeline will download the most-recent artifact from
+    # the target branch via DownloadPipelineArtifact@2 (Stage 2, below).
+    - task: PublishPipelineArtifact@1
+      inputs:
+        targetPath: $(_codeqlDbPath)
+        artifact: codeql-overlay-base-$(language)
+        publishLocation: pipeline
+      displayName: Publish overlay-base database artifact
+
+    # ── Upload full scan results to GitHub Code Scanning ──────────────────
+    - script: |
+        set -euo pipefail
+        codeql github upload-results \
+          --sarif=$(_sarifFile) \
+          --github-url=https://github.com/ \
+          --repository=$(Build.Repository.Name) \
+          --ref=$(Build.SourceBranch) \
+          --commit=$(Build.SourceVersion)
+      env:
+        GITHUB_TOKEN: $(GITHUB_TOKEN)
+      displayName: Upload full scan results to GitHub Code Scanning
+
+
+# ==============================================================================
+# STAGE 2 – Pull request: Incremental scan (overlay + diff-informed)
+#
+# This stage runs on every pull request.  High-level steps:
+#
+#  1. Download the latest overlay-base database artifact from the target branch.
+#  2. Compute which files changed (by comparing current Git OIDs against the
+#     OIDs snapshot stored in the artifact).
+#  3. Parse the PR diff to extract the added/modified line ranges.
+#  4. Create a CodeQL data-extension pack that feeds these ranges to the
+#     restrictAlertsTo extensible predicate (diff-informed analysis).
+#  5. Initialise an overlay database (processes only the changed files).
+#  6. Run queries with the diff-informed extension pack loaded.
+#  7. Interpret results and tag the SARIF with incremental-mode metadata.
+#  8. Filter the SARIF to remove any results outside the diff ranges.
+#  9. Upload the filtered results to GitHub Code Scanning.
+#
+# Fallback: if no overlay-base artifact is available (e.g. the very first PR
+# before any push to the default branch has been built), the stage falls back
+# to a standard full analysis.
+# ==============================================================================
+- stage: IncrementalPRScan
+  displayName: 'CodeQL: Incremental Scan (Pull Request)'
+  condition: and(succeeded(), eq(variables['Build.Reason'], 'PullRequest'))
+  jobs:
+  - job: CodeQLIncremental
+    displayName: Incremental CodeQL analysis (overlay + diff-informed)
+    pool:
+      vmImage: ubuntu-latest
+    workspace:
+      clean: all
+    steps:
+
+    # ── Download the CodeQL CLI Bundle ─────────────────────────────────────
+    - script: |
+        set -euo pipefail
+        mkdir -p "$(_codeqlBundleDir)"
+
+        echo "Downloading CodeQL CLI Bundle..."
+        wget https://github.com/github/codeql-action/releases/latest/download/codeql-bundle-linux64.tar.gz \
+          -O "$(_codeqlBundleDir)/codeql-bundle-linux64.tar.gz" \
+          --quiet
+
+        tar xzf "$(_codeqlBundleDir)/codeql-bundle-linux64.tar.gz" \
+          -C "$(_codeqlBundleDir)/"
+        rm "$(_codeqlBundleDir)/codeql-bundle-linux64.tar.gz"
+
+        echo "##vso[task.prependpath]$(_codeqlBundleDir)/codeql"
+        echo "CodeQL CLI installed."
+        "$(_codeqlBundleDir)/codeql/codeql" --version
+      displayName: Download CodeQL CLI Bundle
+
+    # ── Download the overlay-base database artifact ────────────────────────
+    # Downloads the most recent successful artifact produced by Stage 1 on the
+    # PR's target branch.  continueOnError: true so the pipeline can fall back
+    # to a full scan if no artifact exists yet.
+    #
+    # NOTE: The pipeline service account must have "Build: Read" permission on
+    # this pipeline definition (granted by default for same-project pipelines).
+    - task: DownloadPipelineArtifact@2
+      continueOnError: true
+      inputs:
+        buildType: specific
+        project: $(System.TeamProjectId)
+        definition: $(System.DefinitionId)
+        buildVersionToDownload: latestFromBranch
+        branchName: $(System.PullRequest.TargetBranch)
+        artifactName: codeql-overlay-base-$(language)
+        targetPath: $(_codeqlDbPath)
+      displayName: Download overlay-base database (from target branch)
+
+    # ── Determine whether an overlay-base database is available ───────────
+    # Sets the overlayAvailable variable used by all subsequent conditional steps.
+    - script: |
+        if [ -d "$(_codeqlDbPath)/$(language)" ] && \
+           [ -f "$(_codeqlDbPath)/codeql-oids.json" ]; then
+          echo "Overlay-base database found — running incremental analysis."
+          echo "##vso[task.setvariable variable=overlayAvailable]true"
+        else
+          echo "No overlay-base database found — will fall back to full analysis."
+          echo "##vso[task.setvariable variable=overlayAvailable]false"
+        fi
+      displayName: Check overlay-base database availability
+
+    # ══════════════════════════════════════════════════════════════════════
+    # INCREMENTAL PATH  (overlayAvailable == true)
+    # ══════════════════════════════════════════════════════════════════════
+
+    # ── Step 1: Compute changed files ─────────────────────────────────────
+    # Compares current Git OIDs against the snapshot in the base database to
+    # find files that were added, modified, or deleted in this PR.
+    # The result is written to overlay-changes.json consumed by database init.
+    - script: |
+        python3 - <<'PYEOF'
+        import subprocess, json, os
+
+        source_dir   = os.environ["BUILD_SOURCESDIRECTORY"]
+        db_path      = os.environ["_CODEQLDB_PATH"]
+        changes_file = os.environ["_OVERLAY_CHANGES"]
+
+        # Load the OIDs snapshot recorded during the overlay-base build
+        oids_snapshot = os.path.join(db_path, "codeql-oids.json")
+        with open(oids_snapshot) as fh:
+            base_oids = json.load(fh)
+
+        # Record the current OIDs
+        result = subprocess.run(
+            ["git", "ls-files", "--recurse-submodules",
+             "--format=%(objectname)_%(path)"],
+            capture_output=True, text=True, cwd=source_dir, check=True,
+        )
+        current_oids = {}
+        for line in result.stdout.splitlines():
+            if "_" in line:
+                oid, path = line.split("_", 1)
+                current_oids[path] = oid
+
+        # Files added, removed, or with a different OID count as changed
+        all_paths = set(base_oids) | set(current_oids)
+        changed = [p for p in all_paths if base_oids.get(p) != current_oids.get(p)]
+
+        print(f"Changed files: {len(changed)}")
+        for f in changed[:20]:
+            print(f"  {f}")
+        if len(changed) > 20:
+            print(f"  ... and {len(changed) - 20} more")
+
+        with open(changes_file, "w") as fh:
+            json.dump({"changes": changed}, fh)
+        PYEOF
+      env:
+        BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)
+        _CODEQLDB_PATH: $(_codeqlDbPath)
+        _OVERLAY_CHANGES: $(_overlayChanges)
+      condition: and(succeeded(), eq(variables['overlayAvailable'], 'true'))
+      displayName: Compute changed files for overlay analysis
+
+    # ── Step 2: Parse the PR diff and create the diff-informed extension pack
+    # Generates a CodeQL data-extension pack that populates the
+    # restrictAlertsTo extensible predicate with the added/modified line
+    # ranges from the PR diff, restricting query output to those lines.
+    #
+    # The pack is placed at:
+    #   $(_extPacksRoot)/my-ci/pr-diff-range/qlpack.yml
+    #   $(_extPacksRoot)/my-ci/pr-diff-range/pr-diff-range.yml
+    #
+    # Diff ranges are also saved as JSON for the CI-side SARIF filter below.
+    - script: |
+        python3 - <<'PYEOF'
+        import subprocess, json, os, re
+
+        source_dir      = os.environ["BUILD_SOURCESDIRECTORY"]
+        target_branch   = os.environ["SYSTEM_PULLREQUEST_TARGETBRANCH"]
+        ext_packs_root  = os.environ["_EXT_PACKS_ROOT"]
+        diff_ranges_file = os.environ["_DIFF_RANGES_FILE"]
+
+        # Strip refs/heads/ prefix when present
+        if target_branch.startswith("refs/heads/"):
+            target_branch = target_branch[len("refs/heads/"):]
+
+        # Fetch the target branch so we can find the merge-base
+        subprocess.run(
+            ["git", "fetch", "origin", target_branch],
+            cwd=source_dir, check=True, capture_output=True,
+        )
+
+        # Merge-base between the PR head and the target branch
+        result = subprocess.run(
+            ["git", "merge-base", f"origin/{target_branch}", "HEAD"],
+            capture_output=True, text=True, cwd=source_dir, check=True,
+        )
+        merge_base = result.stdout.strip()
+        print(f"Merge base: {merge_base}")
+
+        # Unified diff with no context lines so hunk headers are precise
+        diff_result = subprocess.run(
+            ["git", "diff", "--unified=0", f"{merge_base}..HEAD"],
+            capture_output=True, text=True, cwd=source_dir,
+        )
+
+        # Parse hunk headers to build a list of changed-line ranges.
+        # Each entry is [absolute_file_path, start_line (1-based), end_line (1-based)].
+        # Ranges are at hunk granularity; the CI-side SARIF filter below
+        # provides the precise per-line filtering.
+        ranges = []
+        current_file = None
+
+        for line in diff_result.stdout.splitlines():
+            if line.startswith("+++ b/"):
+                current_file = os.path.join(source_dir, line[6:].rstrip())
+            elif line.startswith("@@ "):
+                # @@ -old_start[,old_count] +new_start[,new_count] @@
+                m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+                if m and current_file:
+                    new_start = int(m.group(1))
+                    new_count = int(m.group(2)) if m.group(2) is not None else 1
+                    if new_count > 0:
+                        ranges.append(
+                            [current_file, new_start, new_start + new_count - 1]
+                        )
+
+        # When the diff contains only deletions (no added lines) use the
+        # sentinel entry ["", 0, 0] which tells restrictAlertsTo to suppress
+        # all alerts.  An empty data section would leave the predicate inactive,
+        # causing all alerts to be reported — the opposite of the desired result.
+        if not ranges:
+            print("No added/modified lines detected — using sentinel range.")
+            ranges = [["", 0, 0]]
+
+        print(f"Diff-informed ranges: {len(ranges)} hunk(s) across changed files")
+
+        # Save the ranges as JSON for the CI-side SARIF filter (Step 8)
+        with open(diff_ranges_file, "w") as fh:
+            json.dump(ranges, fh)
+
+        # ── Create the CodeQL data-extension pack ──────────────────────────
+        # Directory structure expected by --additional-packs:
+        #   <root>/my-ci/pr-diff-range/qlpack.yml
+        pack_dir = os.path.join(ext_packs_root, "my-ci", "pr-diff-range")
+        os.makedirs(pack_dir, exist_ok=True)
+
+        # qlpack.yml: declares the pack and targets the codeql/util library
+        # where restrictAlertsTo is defined
+        qlpack = (
+            "name: my-ci/pr-diff-range\n"
+            "version: 0.0.0\n"
+            "library: true\n"
+            "extensionTargets:\n"
+            "  codeql/util: '*'\n"
+            "dataExtensions:\n"
+            "  - pr-diff-range.yml\n"
+        )
+
+        # pr-diff-range.yml: data extension rows  [filePath, startLine, endLine]
+        rows = "\n".join(
+            f'      - ["{r[0]}", {r[1]}, {r[2]}]' for r in ranges
+        )
+        ext_data = (
+            "extensions:\n"
+            "  - addsTo:\n"
+            "      pack: codeql/util\n"
+            "      extensible: restrictAlertsTo\n"
+            "      checkPresence: false\n"
+            "    data:\n"
+            f"{rows}\n"
+        )
+
+        with open(os.path.join(pack_dir, "qlpack.yml"), "w") as fh:
+            fh.write(qlpack)
+        with open(os.path.join(pack_dir, "pr-diff-range.yml"), "w") as fh:
+            fh.write(ext_data)
+
+        print(f"Extension pack written to {pack_dir}")
+        PYEOF
+      env:
+        BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)
+        SYSTEM_PULLREQUEST_TARGETBRANCH: $(System.PullRequest.TargetBranch)
+        _EXT_PACKS_ROOT: $(_extPacksRoot)
+        _DIFF_RANGES_FILE: $(_diffRangesFile)
+      condition: and(succeeded(), eq(variables['overlayAvailable'], 'true'))
+      displayName: Parse PR diff and create diff-informed extension pack
+
+    # ── Step 3: Create a code-scanning config to exclude diagnostic queries ─
+    # Queries tagged exclude-from-incremental produce metrics / coverage data
+    # rather than security alerts and add no value in an incremental context.
+    - script: |
+        set -euo pipefail
+        mkdir -p "$(dirname $(_codeqlConfig))"
+        cat > "$(_codeqlConfig)" <<'EOF'
+        query-filters:
+          - exclude:
+              tags: exclude-from-incremental
+        EOF
+        echo "Code-scanning config written to $(_codeqlConfig)"
+      condition: and(succeeded(), eq(variables['overlayAvailable'], 'true'))
+      displayName: Create code-scanning config (exclude diagnostic queries)
+
+    # ── Step 4: Initialise the overlay database ────────────────────────────
+    # Extends the cached overlay-base database with only the changed files.
+    # --overlay-changes  path to the JSON file listing changed files
+    # --codescanning-config  config file filtering out diagnostic queries
+    #
+    # IMPORTANT: do NOT pass --overwrite or --force-overwrite.  The command
+    # must extend the existing cached base, not replace it.
+    - script: |
+        set -euo pipefail
+        codeql database init \
+          --overlay-changes=$(_overlayChanges) \
+          --codescanning-config=$(_codeqlConfig) \
+          --db-cluster \
+          --language=$(language) \
+          --source-root=$(Build.SourcesDirectory) \
+          $(_codeqlDbPath)
+      condition: and(succeeded(), eq(variables['overlayAvailable'], 'true'))
+      displayName: Initialize overlay database (changed files only)
+
+    # ── Step 5: Finalize the overlay database ─────────────────────────────
+    # Re-extracts only the files listed in overlay-changes.json.
+    - script: |
+        set -euo pipefail
+        codeql database finalize \
+          $(_codeqlDbPath)/$(language)
+      condition: and(succeeded(), eq(variables['overlayAvailable'], 'true'))
+      displayName: Finalize overlay database (extract changed files)
+
+    # ── Step 6: Run CodeQL queries with the diff-informed extension pack ───
+    # --additional-packs  root directory containing the extension pack
+    # --extension-packs   name of the pack (must match 'name' in qlpack.yml)
+    - script: |
+        set -euo pipefail
+        codeql database run-queries \
+          --additional-packs=$(_extPacksRoot) \
+          --extension-packs=my-ci/pr-diff-range \
+          $(_codeqlDbPath)/$(language) \
+          $(language)-security-and-quality.qls
+      condition: and(succeeded(), eq(variables['overlayAvailable'], 'true'))
+      displayName: Run CodeQL queries (diff-informed, overlay)
+
+    # ── Step 7: Interpret results and tag SARIF with incremental metadata ──
+    # --sarif-run-property  tags the SARIF run with the active incremental
+    #   modes so tooling and dashboards can identify incremental results.
+    - script: |
+        set -euo pipefail
+        codeql database interpret-results \
+          --format=sarif-latest \
+          --sarif-category="$(language)" \
+          --sarif-run-property=incrementalMode=overlay,diff-informed \
+          --output=$(_sarifFile) \
+          $(_codeqlDbPath)/$(language) \
+          $(language)-security-and-quality.qls
+      condition: and(succeeded(), eq(variables['overlayAvailable'], 'true'))
+      displayName: Interpret results (overlay + diff-informed SARIF)
+
+    # ── Step 8: CI-side SARIF filter ──────────────────────────────────────
+    # The restrictAlertsTo predicate reduces — but does not guarantee
+    # elimination of — out-of-range alerts.  This filter is the definitive
+    # check: a result is kept only when at least one of its locations or
+    # relatedLocations intersects a diff range for that file.
+    #
+    # Intersection rule: range.startLine <= location.endLine
+    #                AND location.startLine <= range.endLine
+    # Special case: range (0, 0) matches any location in the file.
+    - script: |
+        python3 - <<'PYEOF'
+        import json, os
+
+        sarif_file       = os.environ["_SARIF_FILE"]
+        diff_ranges_file = os.environ["_DIFF_RANGES_FILE"]
+        source_dir       = os.environ["BUILD_SOURCESDIRECTORY"]
+
+        # Load diff ranges: list of [file_path, start_line, end_line]
+        with open(diff_ranges_file) as fh:
+            raw_ranges = json.load(fh)
+
+        # Index by absolute file path for fast lookup
+        ranges_by_file = {}
+        for entry in raw_ranges:
+            path, start, end = entry[0], int(entry[1]), int(entry[2])
+            ranges_by_file.setdefault(path, []).append((start, end))
+
+        def resolve_uri(uri):
+            """Convert a SARIF artifact URI to an absolute file path."""
+            if uri.startswith("file://"):
+                return uri[7:]
+            # Relative URIs are relative to the source root
+            return os.path.normpath(os.path.join(source_dir, uri))
+
+        def intersects(path, loc_start, loc_end):
+            """True if a code location intersects any diff range for path."""
+            for (rng_start, rng_end) in ranges_by_file.get(path, []):
+                if rng_start == 0 and rng_end == 0:
+                    return True          # sentinel — whole file matches
+                if rng_start <= loc_end and loc_start <= rng_end:
+                    return True
+            return False
+
+        def result_in_diff(result):
+            """True if any location / relatedLocation of a result intersects."""
+            all_locs = result.get("locations", []) + \
+                       result.get("relatedLocations", [])
+            for loc in all_locs:
+                phys   = loc.get("physicalLocation", {})
+                uri    = phys.get("artifactLocation", {}).get("uri", "")
+                region = phys.get("region", {})
+                start  = region.get("startLine", 1)
+                end    = region.get("endLine", start)
+                if intersects(resolve_uri(uri), start, end):
+                    return True
+            return False
+
+        with open(sarif_file) as fh:
+            sarif = json.load(fh)
+
+        total_before = 0
+        total_after  = 0
+        for run in sarif.get("runs", []):
+            before = run.get("results", [])
+            total_before += len(before)
+            run["results"] = [r for r in before if result_in_diff(r)]
+            total_after += len(run["results"])
+
+        with open(sarif_file, "w") as fh:
+            json.dump(sarif, fh)
+
+        print(f"SARIF filtered: {total_after}/{total_before} results "
+              f"are within the PR diff ranges.")
+        PYEOF
+      env:
+        _SARIF_FILE: $(_sarifFile)
+        _DIFF_RANGES_FILE: $(_diffRangesFile)
+        BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)
+      condition: and(succeeded(), eq(variables['overlayAvailable'], 'true'))
+      displayName: Filter SARIF to PR diff ranges (CI-side filtering)
+
+    # ── Step 9: Upload incremental results to GitHub Code Scanning ─────────
+    - script: |
+        set -euo pipefail
+        codeql github upload-results \
+          --sarif=$(_sarifFile) \
+          --github-url=https://github.com/ \
+          --repository=$(Build.Repository.Name) \
+          --ref=$(Build.SourceBranch) \
+          --commit=$(Build.SourceVersion)
+      env:
+        GITHUB_TOKEN: $(GITHUB_TOKEN)
+      condition: and(succeeded(), eq(variables['overlayAvailable'], 'true'))
+      displayName: Upload incremental results to GitHub Code Scanning
+
+    # ══════════════════════════════════════════════════════════════════════
+    # FALLBACK PATH  (overlayAvailable == false)
+    # No overlay-base database was found (e.g. this is the very first PR
+    # before Stage 1 has ever run on the target branch).
+    # Falls back to a standard full analysis identical to the baseline template.
+    # ══════════════════════════════════════════════════════════════════════
+
+    - script: |
+        set -euo pipefail
+        echo "No overlay-base database available — running full CodeQL analysis."
+        codeql database create \
+          --language=$(language) \
+          --source-root=$(Build.SourcesDirectory) \
+          --github-url=https://github.com/ \
+          $(Pipeline.Workspace)/codeql-db-full \
+          --overwrite
+      condition: and(succeeded(), eq(variables['overlayAvailable'], 'false'))
+      displayName: '[Fallback] Create full CodeQL database'
+
+    - script: |
+        set -euo pipefail
+        codeql database analyze \
+          --format=sarif-latest \
+          --sarif-category="$(language)" \
+          --sarif-add-baseline-file-info \
+          --output=$(_sarifFile) \
+          $(Pipeline.Workspace)/codeql-db-full \
+          $(language)-security-and-quality.qls
+      condition: and(succeeded(), eq(variables['overlayAvailable'], 'false'))
+      displayName: '[Fallback] Analyze full CodeQL database'
+
+    - script: |
+        set -euo pipefail
+        codeql github upload-results \
+          --sarif=$(_sarifFile) \
+          --github-url=https://github.com/ \
+          --repository=$(Build.Repository.Name) \
+          --ref=$(Build.SourceBranch) \
+          --commit=$(Build.SourceVersion)
+      env:
+        GITHUB_TOKEN: $(GITHUB_TOKEN)
+      condition: and(succeeded(), eq(variables['overlayAvailable'], 'false'))
+      displayName: '[Fallback] Upload full analysis results to GitHub Code Scanning'
