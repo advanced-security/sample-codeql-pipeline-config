@@ -57,6 +57,29 @@ This template demonstrates how to run CodeQL analysis using "sandwich mode" (ind
 
 This approach is recommended for complex build processes on Linux or when you need to integrate with existing build steps while maintaining CodeQL tracing.
 
+#### [Azure-Pipelines-template-linux-incremental.yml](Azure-Pipelines-template-linux-incremental.yml)
+
+This template demonstrates **incremental CodeQL analysis** on Linux using two complementary techniques:
+
+- **Overlay analysis** – reuses a cached "overlay-base" database from the default branch so only changed files are re-extracted and unchanged query results are replayed from cache, dramatically reducing database creation and query evaluation time.
+- **Diff-informed analysis** – restricts alert output to lines that were added or modified in the pull request, reducing noise and focusing results on what the author actually changed.
+
+Together these techniques can cut PR scan times by up to 10× in large codebases.
+
+The pipeline has two stages that are selected automatically based on the build trigger:
+
+| Trigger | Stage | What happens |
+|---|---|---|
+| Push to default branch | `OverlayBaseScan` | Full scan with `--overlay-base` mode; database published as a pipeline artifact |
+| Pull request | `IncrementalPRScan` | Overlay + diff-informed incremental scan; falls back to a full scan if no artifact exists |
+
+**Requirements:**
+- CodeQL CLI Bundle 2.23.8+ (2.23.9+ for JavaScript, Python, or Ruby) — see [minimum CLI bundle versions](https://docs.github.com/en/code-security/how-tos/find-and-fix-code-vulnerabilities/scan-from-the-command-line/incremental-analysis#minimum-cli-bundle-versions)
+- Git 2.38.0+ on the build agent (needed for `git ls-files --format`)
+- Overlay analysis only supports `build-mode: none`; compiled languages (except Go) are not supported
+
+For full background, see [Incremental analysis from the command line](https://docs.github.com/en/code-security/how-tos/find-and-fix-code-vulnerabilities/scan-from-the-command-line/incremental-analysis).
+
 ## Azure Pipelines Templates
 
 The [codeql-steps-template.yml](codeql-steps-template.yml) is a reusable steps template that can be easily included in existing Azure Pipelines. This template:
